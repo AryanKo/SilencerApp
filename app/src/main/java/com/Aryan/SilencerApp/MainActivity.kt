@@ -3,16 +3,33 @@ package com.Aryan.SilencerApp
 
 // --- Imports ---
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.result.contract.ActivityResultContracts
 import android.os.Bundle
 import android.widget.SeekBar
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
-// auto-generated class from activity_main.xml layout
 import com.Aryan.SilencerApp.databinding.ActivityMainBinding
 
-class MainActivity : AppCompatActivity() {
 
+
+class MainActivity : AppCompatActivity() {
+    private val audioPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted: Boolean ->
+        if (isGranted) {
+            // Permission WAS granted.
+            Toast.makeText(this, "Microphone permission granted!", Toast.LENGTH_SHORT).show()
+        } else {
+            // Permission was DENIED.
+            Toast.makeText(this, "Microphone permission is required for the app to work.", Toast.LENGTH_LONG).show()
+
+            // binding.switchMonitoring.isEnabled = false
+        }
+    }
     // --- Class Variables ---
     private lateinit var binding: ActivityMainBinding
     private var currentThreshold = 60
@@ -20,10 +37,9 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // This "inflates" (loads) your XML layout into memory
         binding = ActivityMainBinding.inflate(layoutInflater)
-        // This sets your app's screen to show that layout
-        setContentView(binding.root) // 'binding.root' is your main ConstraintLayout
+
+        setContentView(binding.root)
 
         // --- 1. Setup Control Listeners (Making buttons respond) ---
 
@@ -39,7 +55,7 @@ class MainActivity : AppCompatActivity() {
                 binding.tvThresholdValue.text = progress.toString()
             }
 
-            override fun onStartTrackingTouch(seekBar: SeekBar?) { /* We don't need this */ }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) { }
 
             override fun onStopTrackingTouch(seekBar: SeekBar?) {
                 // Save the final value
@@ -56,12 +72,11 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Set a listener for our Calibrate button (btnCalibrate)
+        // Set a listener for Calibrate button (btnCalibrate)
         binding.btnCalibrate.setOnClickListener {
-            // Show a simple pop-up message (a "Toast")
             Toast.makeText(this, "Calibration feature not implemented yet.", Toast.LENGTH_SHORT).show()
         }
-
+        checkAndRequestAudioPermission()
         // --- 2. Set Initial UI State ---
         // When the app first starts, set it to the "OFF" state.
         stopMonitoringService()
@@ -113,8 +128,6 @@ class MainActivity : AppCompatActivity() {
         binding.tvCurrentMode.background = ContextCompat.getDrawable(this, R.drawable.bg_mode_paused)
     }
 
-    // --- HELPER FUNCTIONS ---
-
     /**
      * Updates the decibel progress ring and text.
      */
@@ -139,6 +152,34 @@ class MainActivity : AppCompatActivity() {
             // Set text and background to GREEN ("Normal")
             binding.tvCurrentMode.text = "Normal Mode"
             binding.tvCurrentMode.background = ContextCompat.getDrawable(this, R.drawable.bg_mode_normal)
+        }
+    }
+    /**
+     * Checks if the RECORD_AUDIO permission is granted.
+     * If not, it launches the permission request pop-up.
+     */
+    private fun checkAndRequestAudioPermission() {
+        when {
+            // 1. Check if permission is already granted
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED -> {
+                // Permission is already granted.
+                Toast.makeText(this, "Microphone permission is already granted.", Toast.LENGTH_SHORT).show()
+            }
+
+            shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO) -> {
+                Toast.makeText(this, "We need microphone access to detect noise levels.", Toast.LENGTH_LONG).show()
+                // launch request
+                audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            }
+
+            // 3. If no permission, ask for it
+            else -> {
+                // launch request
+                audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            }
         }
     }
 }

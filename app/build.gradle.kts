@@ -9,9 +9,6 @@ android {
         version = release(36)
     }
 
-        // ... all the other settings like compileSdk, defaultConfig, etc. ...
-
-        // ADD THIS BLOCK
         buildFeatures {
             viewBinding = true
         }

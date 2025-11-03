@@ -2,10 +2,13 @@
 package com.Aryan.SilencerApp
 
 // --- Imports ---
-
+import android.app.NotificationManager
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.provider.Settings
 import android.Manifest
 import android.content.pm.PackageManager
-import android.os.Build
 import androidx.activity.result.contract.ActivityResultContracts
 import android.os.Bundle
 import android.widget.SeekBar
@@ -30,10 +33,21 @@ class MainActivity : AppCompatActivity() {
             // binding.switchMonitoring.isEnabled = false
         }
     }
+    private val dndPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        // This callback is triggered when the user returns from the settings page.
+        // It re-checks the permission.
+        if (!isDndPermissionGranted()) {
+            Toast.makeText(this, "Do Not Disturb access is required to change ringer modes.", Toast.LENGTH_LONG).show()
+        } else {
+            Toast.makeText(this, "DND access granted!", Toast.LENGTH_SHORT).show()
+        }
+    }
     // --- Class Variables ---
     private lateinit var binding: ActivityMainBinding
     private var currentThreshold = 60
-
+    private lateinit var notificationManager: NotificationManager
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -41,6 +55,8 @@ class MainActivity : AppCompatActivity() {
 
         setContentView(binding.root)
 
+
+        notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         // --- 1. Setup Control Listeners (Making buttons respond) ---
 
         // Set the initial text for the slider to match its default progress (60)
@@ -77,7 +93,8 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Calibration feature not implemented yet.", Toast.LENGTH_SHORT).show()
         }
         checkAndRequestAudioPermission()
-        // --- 2. Set Initial UI State ---
+        checkAndRequestDndPermission()
+
         // When the app first starts, set it to the "OFF" state.
         stopMonitoringService()
     }
@@ -181,5 +198,39 @@ class MainActivity : AppCompatActivity() {
                 audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             }
         }
+    }
+    /**
+     * Checks if the app has been granted 'Do Not Disturb' (DND) access. Required for API 23 (Marshmallow) and above.
+     * @return True if permission is granted, false otherwise.
+     */
+    private fun isDndPermissionGranted(): Boolean {
+        // notificationManager.isNotificationPolicyAccessGranted is the correct check
+        return notificationManager.isNotificationPolicyAccessGranted
+    }
+
+    /**
+     * Checks if DND (Do Not Disturb) access is granted.
+     * If not, it launches the system settings page for the user to grant it.
+     */
+
+    /**
+     * Checks if DND (Do Not Disturb) access is granted.
+     * If not, it launches the system settings page for the user to grant it.
+     */
+    private fun checkAndRequestDndPermission() {
+        // Checks if permission is already granted
+        if (isDndPermissionGranted()) {
+            Toast.makeText(this, "DND access is already granted.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // If not granted, shows a toast and prepares to launch the settings page
+        Toast.makeText(this, "Please grant Do Not Disturb access for the app to work.", Toast.LENGTH_LONG).show()
+
+        // Creates an Intent to open the *correct* DND access settings page
+        val intent = Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
+
+        // Launches the settings page
+        dndPermissionLauncher.launch(intent)
     }
 }

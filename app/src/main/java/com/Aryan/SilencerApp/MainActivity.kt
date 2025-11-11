@@ -1,53 +1,45 @@
-
 package com.Aryan.SilencerApp
 
 import android.Manifest
 import android.app.NotificationManager
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.media.AudioFormat
-import android.media.AudioRecord
-import android.media.MediaRecorder
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.util.Log
 import android.widget.SeekBar
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.Aryan.SilencerApp.databinding.ActivityMainBinding
-import kotlin.math.log10
-import kotlin.math.sqrt
 
 class MainActivity : AppCompatActivity() {
-    private val audioPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted: Boolean ->
-        if (isGranted) {
-            // Permission granted.
-            Toast.makeText(this, "Microphone permission granted!", Toast.LENGTH_SHORT).show()
-        } else {
-            // Permission denied.
-            Toast.makeText(this, "Microphone permission is required for the app to work.", Toast.LENGTH_LONG).show()
-        }
-    }
-    private val dndPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) {
-        // Re-checks the DND permission when the user returns from the settings page.
-        if (!isDndPermissionGranted()) {
-            Toast.makeText(this, "Do Not Disturb access is required to change ringer modes.", Toast.LENGTH_LONG).show()
-        } else {
-            Toast.makeText(this, "DND access granted!", Toast.LENGTH_SHORT).show()
-        }
-    }
 
-    // Class Variables
     private lateinit var binding: ActivityMainBinding
     private var currentThreshold = 60
     private lateinit var notificationManager: NotificationManager
+    private lateinit var localBroadcastManager: LocalBroadcastManager
+
+    /**
+     * Receives status updates from the SoundMonitoringService.
+     */
+    private val statusUpdateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == SoundMonitoringService.BROADCAST_ACTION_STATUS_UPDATE) {
+                val db = intent.getDoubleExtra(SoundMonitoringService.EXTRA_DECIBEL_LEVEL, 0.0)
+                val isSilent = intent.getBooleanExtra(SoundMonitoringService.EXTRA_RINGER_MODE, false)
+
+                updateDecibelUI(db.toInt())
+                updateModeUI(isSilent)
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -55,39 +47,45 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        localBroadcastManager = LocalBroadcastManager.getInstance(this)
 
-        // Sets up listeners for UI controls.
-        setupControlListeners()
-
+        setupListeners()
 
         checkAndRequestAudioPermission()
         checkAndRequestDndPermission()
+        checkAndRequestNotificationPermission()
 
-        // Set the initial state to "OFF" when the app starts.
-        stopMonitoringService()
+        updateUIMonitoringStopped()
     }
 
-    private fun setupControlListeners() {
-        // Set the initial text for the slider to match its default progress.
+    override fun onResume() {
+        super.onResume()
+        val filter = IntentFilter(SoundMonitoringService.BROADCAST_ACTION_STATUS_UPDATE)
+        localBroadcastManager.registerReceiver(statusUpdateReceiver, filter)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        localBroadcastManager.unregisterReceiver(statusUpdateReceiver)
+    }
+
+    /**
+     * Initializes and sets listeners for UI components.
+     */
+    private fun setupListeners() {
         binding.tvThresholdValue.text = binding.seekThreshold.progress.toString()
         currentThreshold = binding.seekThreshold.progress
 
-        // Listener for the Threshold Slider.
         binding.seekThreshold.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                // Update the threshold value text.
                 binding.tvThresholdValue.text = progress.toString()
             }
-
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-
             override fun onStopTrackingTouch(seekBar: SeekBar?) {
-                // Save the final threshold value.
                 currentThreshold = seekBar?.progress ?: 60
             }
         })
 
-        // Listener for the main Monitoring Switch.
         binding.switchMonitoring.setOnCheckedChangeListener { _, isChecked ->
             if (isChecked) {
                 startMonitoringService()
@@ -95,128 +93,74 @@ class MainActivity : AppCompatActivity() {
                 stopMonitoringService()
             }
         }
-
-        // Listener for the Calibrate button.
-        binding.btnCalibrate.setOnClickListener {
-            Toast.makeText(this, "Calibration feature not implemented yet.", Toast.LENGTH_SHORT).show()
-        }
     }
-    
+
     /**
-     * Updates the UI to the "ON" state, initializes AudioRecord, and starts the monitoring thread.
+     * Starts the sound monitoring service after performing permission checks.
      */
     private fun startMonitoringService() {
-        // 1. Verify Audio Permission
-        // This check is crucial. Initializing AudioRecord without permission will crash the app.
-        if (ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.RECORD_AUDIO
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             Toast.makeText(this, "Microphone permission is not granted.", Toast.LENGTH_SHORT).show()
-            // Reset the switch to OFF, as monitoring cannot start.
+            binding.switchMonitoring.isChecked = false
+            return
+        }
+        if (!isDndPermissionGranted()) {
+            Toast.makeText(this, "Do Not Disturb permission is not granted.", Toast.LENGTH_SHORT).show()
+            binding.switchMonitoring.isChecked = false
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            Toast.makeText(this, "Notification permission is not granted.", Toast.LENGTH_SHORT).show()
             binding.switchMonitoring.isChecked = false
             return
         }
 
-        // 2. Initialize AudioRecord
-        try {
-            // Get the minimum buffer size required for the device's hardware.
-            bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
-
-            // Handle cases where the buffer size is invalid.
-            if (bufferSize == AudioRecord.ERROR_BAD_VALUE) {
-                Log.e("SilencerApp", "Invalid AudioRecord parameters.")
-                return
-            }
-
-            // Create the AudioRecord instance.
-            audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                sampleRate,
-                channelConfig,
-                audioFormat,
-                bufferSize
-            )
-
-            // Start recording.
-            audioRecord?.startRecording()
-
-        } catch (e: Exception) {
-            Log.e("SilencerApp", "AudioRecord initialization failed", e)
-            Toast.makeText(this, "Microphone is in use by another app.", Toast.LENGTH_SHORT).show()
-            binding.switchMonitoring.isChecked = false
-            return
+        val serviceIntent = Intent(this, SoundMonitoringService::class.java).apply {
+            action = SoundMonitoringService.ACTION_START_MONITORING
+            putExtra(SoundMonitoringService.EXTRA_THRESHOLD, currentThreshold)
         }
 
-        // 3. Start Monitoring Thread
-        isMonitoring = true
-        monitoringThread = Thread {
-            val audioBuffer = ShortArray(bufferSize)
+        ContextCompat.startForegroundService(this, serviceIntent)
+        updateUIMonitoringStarted()
+    }
 
-            // Main loop for the monitoring thread.
-            while (isMonitoring) {
-                // Read audio data from the microphone into the buffer.
-                val readResult = audioRecord?.read(audioBuffer, 0, bufferSize)
-
-                if (readResult != null && readResult > 0) {
-                    // Calculate the decibel level from the buffer.
-                    val db = calculateDecibel(audioBuffer)
-
-                    runOnUiThread {
-                        updateDecibelUI(db.toInt())
-                    }
-                }
-
-                // Pause the thread briefly to avoid excessive CPU usage.
-                try {
-                    Thread.sleep(250) // Samples 4 times per second.
-                } catch (e: InterruptedException) {
-                    // Thread was interrupted, likely by stopMonitoringService().
-                    isMonitoring = false
-                }
-            }
+    /**
+     * Stops the sound monitoring service.
+     */
+    private fun stopMonitoringService() {
+        val serviceIntent = Intent(this, SoundMonitoringService::class.java).apply {
+            action = SoundMonitoringService.ACTION_STOP_MONITORING
         }
-        // Start the thread.
-        monitoringThread?.start()
+        startService(serviceIntent)
+        updateUIMonitoringStopped()
+    }
 
-        // 4. Update UI to "ON" state
+    /**
+     * Updates the UI to reflect that monitoring has started.
+     */
+    private fun updateUIMonitoringStarted() {
         binding.lottieMicIcon.playAnimation()
         binding.cardDashboard.alpha = 1.0f
         binding.seekThreshold.isEnabled = false
-        binding.btnCalibrate.isEnabled = false
-        updateModeUI(isSilent = false)
     }
 
     /**
-     * Updates the UI to the "OFF" state, stops the monitoring thread, and releases AudioRecord resources.
+     * Updates the UI to reflect that monitoring has stopped.
      */
-    private fun stopMonitoringService() {
-
-        if (monitoringThread != null) {
-            isMonitoring = false // Signal the thread's while-loop to exit.
-            monitoringThread?.interrupt() // Wake the thread if it's sleeping.
-            monitoringThread = null
-        }
-
-        if (audioRecord != null) {
-            if (audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
-                audioRecord?.stop() // Stop recording.
-            }
-            audioRecord?.release() // Release the hardware.
-            audioRecord = null
-        }
-
+    private fun updateUIMonitoringStopped() {
         binding.lottieMicIcon.pauseAnimation()
         binding.lottieMicIcon.progress = 0f
         binding.cardDashboard.alpha = 0.7f
         binding.seekThreshold.isEnabled = true
-        binding.btnCalibrate.isEnabled = true
+
         binding.tvDecibelValue.text = "-- dB"
         binding.progressDecibel.progress = 0
         binding.tvCurrentMode.text = "Monitoring Paused"
         binding.tvCurrentMode.background =
             ContextCompat.getDrawable(this, R.drawable.bg_mode_paused)
+        binding.tvDecibelAnalogy.text = "-- Awaiting audio --"
     }
 
     /**
@@ -226,6 +170,7 @@ class MainActivity : AppCompatActivity() {
         if (binding.switchMonitoring.isChecked) {
             binding.progressDecibel.setProgressCompat(db, true)
             binding.tvDecibelValue.text = "$db dB"
+            binding.tvDecibelAnalogy.text = getDecibelAnalogy(db)
         }
     }
 
@@ -236,112 +181,106 @@ class MainActivity : AppCompatActivity() {
         if (!binding.switchMonitoring.isChecked) return
 
         if (isSilent) {
-            // Set text and background to RED ("Silent").
             binding.tvCurrentMode.text = "Silent Mode"
-            binding.tvCurrentMode.background = ContextCompat.getDrawable(this, R.drawable.bg_mode_silent)
+            binding.tvCurrentMode.background =
+                ContextCompat.getDrawable(this, R.drawable.bg_mode_silent)
         } else {
-            // Set text and background to GREEN ("Normal").
             binding.tvCurrentMode.text = "Normal Mode"
-            binding.tvCurrentMode.background = ContextCompat.getDrawable(this, R.drawable.bg_mode_normal)
+            binding.tvCurrentMode.background =
+                ContextCompat.getDrawable(this, R.drawable.bg_mode_normal)
+        }
+    }
+
+    private val audioPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted: Boolean ->
+        if (isGranted) {
+            Toast.makeText(this, "Microphone permission granted!", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "Microphone permission is required.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private val dndPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        if (isDndPermissionGranted()) {
+            Toast.makeText(this, "DND access granted!", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "DND access is required.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted: Boolean ->
+        if (isGranted) {
+            Toast.makeText(this, "Notification permission granted!", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "Notification permission is required.", Toast.LENGTH_LONG).show()
         }
     }
 
     /**
-     * Checks if the RECORD_AUDIO permission is granted.
-     * If not, it launches the permission request pop-up.
+     * Checks for audio permission and requests it if it has not been granted.
      */
     private fun checkAndRequestAudioPermission() {
         when {
-            // Check if permission is already granted.
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.RECORD_AUDIO
-            ) == PackageManager.PERMISSION_GRANTED -> {
-                // Permission is already granted.
-                Toast.makeText(this, "Microphone permission is already granted.", Toast.LENGTH_SHORT).show()
-            }
-
+            ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED -> {}
             shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO) -> {
-                Toast.makeText(this, "Microphone access is required to detect noise levels.", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "Microphone access is needed to detect noise.", Toast.LENGTH_LONG).show()
                 audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             }
-
-            // If no permission, ask for it.
-            else -> {
-                audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-            }
+            else -> audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
 
     /**
-     * Checks if the app has been granted 'Do Not Disturb' (DND) access.
-     * Required for API 23 (Marshmallow) and above.
-     * @return True if permission is granted, false otherwise.
+     * Checks if the user has granted Do Not Disturb access.
      */
     private fun isDndPermissionGranted(): Boolean {
         return notificationManager.isNotificationPolicyAccessGranted
     }
 
     /**
-     * Checks if DND (Do Not Disturb) access is granted.
-     * If not, it launches the system settings page for the user to grant it.
+     * Checks for Do Not Disturb permission and launches the settings screen if not granted.
      */
     private fun checkAndRequestDndPermission() {
-        // Check if permission is already granted.
-        if (isDndPermissionGranted()) {
-            Toast.makeText(this, "DND access is already granted.", Toast.LENGTH_SHORT).show()
-            return
-        }
+        if (isDndPermissionGranted()) return
 
-        // If not granted, show a toast and prepare to launch the settings page.
-        Toast.makeText(this, "Please grant Do Not Disturb access for the app to work.", Toast.LENGTH_LONG).show()
-
-        // Create an Intent to open the DND access settings page.
+        Toast.makeText(this, "Please grant Do Not Disturb access.", Toast.LENGTH_LONG).show()
         val intent = Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
-
-        // Launch the settings page.
         dndPermissionLauncher.launch(intent)
     }
 
-    // AudioRecord and Monitoring Variables
-    private var audioRecord: AudioRecord? = null
-    private var monitoringThread: Thread? = null
-
-    // A flag to control the while-loop in the monitoring thread.
-    @Volatile private var isMonitoring = false
-
-    // Audio configuration settings.
-    private val sampleRate = 44100 // Standard sample rate.
-    private val channelConfig = AudioFormat.CHANNEL_IN_MONO
-    private val audioFormat = AudioFormat.ENCODING_PCM_16BIT
-
-    // The size of the buffer to read audio data into.
-    private var bufferSize = 0
+    /**
+     * Checks for notification permission on Android 13+ and requests it if not granted.
+     */
+    private fun checkAndRequestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            when {
+                ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED -> {}
+                shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS) -> {
+                    Toast.makeText(this, "Notification permission is needed for the service.", Toast.LENGTH_LONG).show()
+                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+                else -> notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
 
     /**
-     * Calculates the decibel (dB) level from a buffer of raw audio data.
-     * @param audioBuffer The buffer of 16-bit audio samples.
-     * @return The calculated decibel level as a Double.
+     * Returns a real-world analogy string based on the decibel level.
      */
-    private fun calculateDecibel(audioBuffer: ShortArray): Double {
-        var sum = 0.0
-
-        // Sum the squares of the amplitudes.
-        for (sample in audioBuffer) {
-            sum += sample.toDouble() * sample.toDouble()
-        }
-
-        // Calculate the Root Mean Square (RMS).
-        val rms = sqrt(sum / audioBuffer.size)
-
-        // Calculate the dB level: 20 * log10(rms).
-        // A check for rms > 0 is essential to avoid log(0), which is -Infinity.
-        return if (rms > 0) {
-            // This calculation gives a value (e.g., 60-90) that is
-            // easy to understand as a "decibel" level for the UI.
-            20 * log10(rms)
-        } else {
-            0.0 // Return 0 if silence (rms = 0).
+    private fun getDecibelAnalogy(db: Int): String {
+        return when {
+            db < 30 -> "Faint (Quiet Forest)"
+            db < 40 -> "Quiet (Library)"
+            db < 60 -> "Moderate (Normal conversation)"
+            db < 70 -> "Loud (Street traffic)"
+            db < 80 -> "Very Loud (Alarm clock)"
+            db < 90 -> "Disruptive (Mixer or Grinder)"
+            else -> "Harmful (Loud concert)"
         }
     }
 }

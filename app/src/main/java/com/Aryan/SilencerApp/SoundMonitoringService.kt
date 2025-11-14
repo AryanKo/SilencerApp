@@ -14,45 +14,48 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Build
 import android.os.IBinder
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
-import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import kotlin.math.log10
 import kotlin.math.sqrt
 
 class SoundMonitoringService : Service() {
 
+    // --- AudioRecord and Monitoring Variables ---
     private var audioRecord: AudioRecord? = null
     private var monitoringThread: Thread? = null
     @Volatile private var isMonitoring = false
     private var bufferSize = 0
 
-    // Audio configuration parameters.
+    // Audio configuration
     private val sampleRate = 44100
     private val channelConfig = AudioFormat.CHANNEL_IN_MONO
     private val audioFormat = AudioFormat.ENCODING_PCM_16BIT
 
+    // --- System Service Variables ---
     private lateinit var audioManager: AudioManager
     private lateinit var notificationManager: NotificationManager
-    private lateinit var localBroadcastManager: LocalBroadcastManager
+    private lateinit var localBroadcastManager: androidx.localbroadcastmanager.content.LocalBroadcastManager
+    private lateinit var vibrator: Vibrator
+
     private var isSilentMode = false
 
-    private var currentThreshold = 60 // Default threshold, updated by intent.
+    // --- Logic Variables ---
+    private var currentThreshold = 60
     private var quietSampleCounter = 0
     private var loudSampleCounter = 0
-    // Persistence threshold: 40 samples * 250ms sleep = 10 seconds.
     private val persistenceThreshold = 40
 
     companion object {
         const val NOTIFICATION_ID = 1
         const val CHANNEL_ID = "SoundMonitoringChannel"
-
         const val ACTION_START_MONITORING = "com.Aryan.SilencerApp.START_MONITORING"
         const val ACTION_STOP_MONITORING = "com.Aryan.SilencerApp.STOP_MONITORING"
         const val EXTRA_THRESHOLD = "com.Aryan.SilencerApp.EXTRA_THRESHOLD"
-
-        // Broadcast actions for service-to-activity communication.
         const val BROADCAST_ACTION_STATUS_UPDATE = "com.Aryan.SilencerApp.STATUS_UPDATE"
         const val EXTRA_DECIBEL_LEVEL = "com.Aryan.SilencerApp.EXTRA_DECIBEL_LEVEL"
         const val EXTRA_RINGER_MODE = "com.Aryan.SilencerApp.EXTRA_RINGER_MODE"
@@ -60,28 +63,29 @@ class SoundMonitoringService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        Log.d("SoundService", "Service onCreate")
 
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        localBroadcastManager = LocalBroadcastManager.getInstance(this)
+        localBroadcastManager = androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(this)
+
+        // Robust Vibrator Initialization
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+            vibrator = vibratorManager.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+        }
 
         val notification = createNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // For Android 10+, specifying the service type is required for microphone access from the background.
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d("SoundService", "Service onStartCommand")
-
         when (intent?.action) {
             ACTION_START_MONITORING -> {
                 currentThreshold = intent.getIntExtra(EXTRA_THRESHOLD, 60)
@@ -92,71 +96,48 @@ class SoundMonitoringService : Service() {
                 stopSelf()
             }
         }
-
         return START_STICKY
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        Log.d("SoundService", "Service onDestroy")
         stopMonitoring()
     }
 
     override fun onBind(intent: Intent?): IBinder? {
-        return null // This is not a bound service.
+        return null
     }
 
-    /**
-     * Initializes AudioRecord and starts the background monitoring thread.
-     */
     private fun startMonitoring() {
-        if (isMonitoring) {
-            Log.w("SoundService", "Monitoring is already running.")
-            return
-        }
+        if (isMonitoring) return
 
-        // Safeguard to ensure audio permission is granted before starting.
-        if (ContextCompat.checkSelfPermission(
-                this,
-                android.Manifest.permission.RECORD_AUDIO
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            Log.e("SoundService", "Cannot start monitoring, RECORD_AUDIO permission not granted.")
+        if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             stopSelf()
             return
         }
 
-        isSilentMode = (audioManager.ringerMode == AudioManager.RINGER_MODE_SILENT)
-        broadcastStatus(0.0, isSilentMode) // Send initial state to the UI.
+        // --- BUG FIX #1: CORRECT STATE CHECK ---
+        // We check for VIBRATE mode, not SILENT mode.
+        isSilentMode = (audioManager.ringerMode == AudioManager.RINGER_MODE_VIBRATE)
+        broadcastStatus(0.0, isSilentMode)
+
         quietSampleCounter = 0
         loudSampleCounter = 0
 
         try {
             bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
-            if (bufferSize == AudioRecord.ERROR_BAD_VALUE) {
-                Log.e("SoundService", "Invalid AudioRecord parameters.")
-                return
-            }
+            if (bufferSize == AudioRecord.ERROR_BAD_VALUE) return
 
             @Suppress("DEPRECATION")
-            audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                sampleRate,
-                channelConfig,
-                audioFormat,
-                bufferSize
-            )
-
+            audioRecord = AudioRecord(MediaRecorder.AudioSource.MIC, sampleRate, channelConfig, audioFormat, bufferSize)
             audioRecord?.startRecording()
 
         } catch (e: Exception) {
-            Log.e("SoundService", "AudioRecord initialization failed", e)
             return
         }
 
         isMonitoring = true
         monitoringThread = Thread {
-            // Buffer size is in bytes, a Short is 2 bytes.
             val audioBuffer = ShortArray(bufferSize / 2)
 
             while (isMonitoring) {
@@ -164,8 +145,7 @@ class SoundMonitoringService : Service() {
 
                 if (readResult != null && readResult > 0) {
                     val db = calculateDecibel(audioBuffer)
-                    
-                    // Logic to adjust ringer mode based on sound level and persistence.
+
                     try {
                         if (db < currentThreshold && !isSilentMode) {
                             quietSampleCounter++
@@ -202,9 +182,6 @@ class SoundMonitoringService : Service() {
         monitoringThread?.start()
     }
 
-    /**
-     * Stops the monitoring thread and releases the AudioRecord resource.
-     */
     private fun stopMonitoring() {
         if (monitoringThread != null) {
             isMonitoring = false
@@ -218,60 +195,69 @@ class SoundMonitoringService : Service() {
             audioRecord?.release()
             audioRecord = null
         }
-        Log.d("SoundService", "Monitoring stopped.")
     }
 
-    /**
-     * Sets the device's ringer mode to silent.
-     */
+    // --- Updated Helper Functions ---
+
     private fun setSilentMode() {
-        if (!notificationManager.isNotificationPolicyAccessGranted) {
-            Log.e("SoundService", "Cannot set silent mode, DND permission is not granted.")
-            return
-        }
+        if (!notificationManager.isNotificationPolicyAccessGranted) return
         try {
-            audioManager.ringerMode = AudioManager.RINGER_MODE_SILENT
+            // 1. Change mode FIRST (Unlocks motor)
+            audioManager.ringerMode = AudioManager.RINGER_MODE_VIBRATE
             isSilentMode = true
-        } catch (e: SecurityException) {
-            Log.e("SoundService", "Security exception while setting silent mode.", e)
-        }
+
+            // 2. Wait slightly
+            Thread.sleep(100)
+
+            // 3. Vibrate
+            triggerVibration()
+
+        } catch (e: Exception) {}
     }
 
-    /**
-     * Sets the device's ringer mode to normal.
-     */
     private fun setNormalMode() {
-        if (!notificationManager.isNotificationPolicyAccessGranted) {
-            Log.e("SoundService", "Cannot set normal mode, DND permission is not granted.")
-            return
-        }
+        if (!notificationManager.isNotificationPolicyAccessGranted) return
         try {
             audioManager.ringerMode = AudioManager.RINGER_MODE_NORMAL
             isSilentMode = false
-        } catch (e: SecurityException) {
-            Log.e("SoundService", "Security exception while setting normal mode.", e)
+
+            Thread.sleep(100)
+            triggerVibration()
+
+        } catch (e: Exception) {}
+    }
+
+    // --- BUG FIX #2: STRONGER VIBRATION ---
+    private fun triggerVibration() {
+        try {
+            // Using a double-buzz pattern (0ms delay, 200ms vibe, 100ms pause, 200ms vibe)
+            // This -1 means "do not repeat"
+            val pattern = longArrayOf(0, 50, 100, 50)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                // Use DEFAULT_AMPLITUDE to be safe on all devices
+                vibrator.vibrate(VibrationEffect.createWaveform(pattern, -1))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(pattern, -1)
+            }
+        } catch (e: Exception) {
+            Log.e("SoundService", "Vibration failed", e)
         }
     }
 
-    /**
-     * Calculates the decibel level from a buffer of raw audio data.
-     */
     private fun calculateDecibel(audioBuffer: ShortArray): Double {
         var sum: Double = 0.0
         for (sample in audioBuffer) {
             sum += sample.toDouble() * sample.toDouble()
         }
         val rms = sqrt(sum / audioBuffer.size)
-        // A check for rms > 0 is essential to avoid log(0) which is -Infinity.
         if (rms > 0) {
             return 20 * log10(rms)
         }
         return 0.0
     }
 
-    /**
-     * Broadcasts the current decibel level and ringer mode to the activity.
-     */
     private fun broadcastStatus(db: Double, isSilent: Boolean) {
         val intent = Intent(BROADCAST_ACTION_STATUS_UPDATE).apply {
             putExtra(EXTRA_DECIBEL_LEVEL, db)
@@ -280,11 +266,7 @@ class SoundMonitoringService : Service() {
         localBroadcastManager.sendBroadcast(intent)
     }
 
-    /**
-     * Creates the persistent notification for the foreground service.
-     */
     private fun createNotification(): Notification {
-        // Create the notification channel for Android 8.0+.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val serviceChannel = NotificationChannel(
                 CHANNEL_ID,

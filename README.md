@@ -13,7 +13,7 @@ Silencer is an intelligent Android application that monitors the ambient noise l
 ## ✨ Core Features
 
 * **Real-time Decibel Monitoring:** Uses the `AudioRecord` API to process the raw microphone stream and calculate a live dB level.
-* **Automatic Ringer Control:** Intelligently switches the phone to **Silent Mode** when the ambient noise is *below* the user's threshold for 10 seconds.
+* **Automatic Ringer Control with haptic feedback:** Intelligently switches the phone to **Silent Mode** when the ambient noise is *below* the user's threshold for 10 seconds.
 * **Smart Restoration:** Automatically returns the phone to **Normal Mode** when the noise level rises *above* the threshold for 10 seconds.
 * **User-Defined Threshold:** An easy-to-use `SeekBar` to set the exact "quiet" threshold (0-120 dB).
 * **Live Analogy:** A dynamic text field that provides a real-world analogy for the current noise level (e.g., "Quiet / Library", "Loud / Traffic").
